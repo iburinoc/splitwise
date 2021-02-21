@@ -1,3 +1,4 @@
+const axios = require('axios');
 const { OAuth2 } = require('oauth');
 const querystring = require('querystring');
 const { promisify } = require('es6-promisify');
@@ -330,6 +331,77 @@ const getSplitwiseRequest = (logger, oauth2) => {
 /**
  * @param {Function} logger - The logger provided by getLogger
  * @param {Object} oauth2 - An instance of OAuth2
+ * @returns A method for making requests to Splitwise
+ */
+const getApiKeySplitwiseRequest = (logger) => {
+  const splitwiseRequestFail = message => fail({
+    logger,
+    message,
+    context: 'splitwiseRequest',
+  });
+
+  /**
+   * Make a request to splitwise
+   * @param {string} endpoint - The endpoint to send a request to
+   * @returns {Promise} The data returned from Splitwise
+   */
+  const splitwiseRequest = (endpoint) => {
+    if (!endpoint) {
+      return splitwiseRequestFail('an endpoint must be specified');
+    }
+
+    return apiKey => axios({
+      url: `${API_URL}${endpoint}`,
+      method: 'get',
+      headers: { 'Authorization': `Bearer ${apiKey}`, },
+    }).then(response => response.data);
+  };
+
+  return splitwiseRequest;
+};
+
+/**
+ * @param {Function} logger - The logger provided by getLogger
+ * @param {Object} oauth2 - An instance of OAuth2
+ * @returns {Function} A method for making requests with data to Splitwise
+ */
+const getApiKeySplitwiseRequestWithData = (logger) => {
+  const splitwiseRequestWithDataFail = message => fail({
+    logger,
+    message,
+    context: 'splitwiseRequestWithData',
+  });
+
+  /**
+   * Make a request with data to Splitwise
+   * @param {string} endpoint - The endpoint to send a request to
+   * @param {string} verb - Which http verb to use
+   * @param {Object} data - The data to be sent along with the request
+   * @returns {Promise} The data returned from Splitwise
+   */
+  const splitwiseRequestWithData = (endpoint, verb, data) => {
+    if (!endpoint) {
+      return splitwiseRequestWithDataFail('an endpoint must be specified');
+    }
+    if (!data) {
+      return splitwiseRequestWithDataFail('data must be provided');
+    }
+
+    return apiKey => axios({
+      url: `${API_URL}${endpoint}`,
+      method: verb,
+      headers: { 'Authorization': `Bearer ${apiKey}`, },
+      params: splitwisifyParameters(data), // un-nest data, and convert bools into numbers
+    }).then(response => response.data);
+  };
+
+  return splitwiseRequestWithData;
+};
+
+
+/**
+ * @param {Function} logger - The logger provided by getLogger
+ * @param {Object} oauth2 - An instance of OAuth2
  * @returns {Function} A method for making requests with data to Splitwise
  */
 const getSplitwiseRequestWithData = (logger, oauth2) => {
@@ -433,9 +505,7 @@ const getDefaultId = (defaultIDs, idType) => {
  * @param {Object} oauth2 - An instance of OAuth2
  * @returns {Function} A method for generating methods for interacting with Splitwise
  */
-const getEndpointMethodGenerator = (logger, accessTokenPromise, defaultIDs, oauth2) => {
-  const splitwiseRequest = getSplitwiseRequest(logger, oauth2);
-  const splitwiseRequestWithData = getSplitwiseRequestWithData(logger, oauth2);
+const getEndpointMethodGenerator = (logger, accessTokenPromise, defaultIDs, splitwiseRequest, splitwiseRequestWithData) => {
   const endpointMethodGeneratorFail = message => fail({
     logger,
     message,
@@ -600,7 +670,7 @@ const getEndpointMethodGenerator = (logger, accessTokenPromise, defaultIDs, oaut
  */
 class Splitwise {
   constructor(options = {}) {
-    const { consumerKey, consumerSecret, accessToken } = options;
+    const { consumerKey, consumerSecret, accessToken, apiKey } = options;
     const defaultIDs = {
       groupID: options.group_id,
       userID: options.user_id,
@@ -609,35 +679,48 @@ class Splitwise {
     };
     const logger = getLogger(options.logger, options.logLevel);
 
-    if (!consumerKey || !consumerSecret) {
-      const message = 'both a consumer key, and a consumer secret must be provided';
-      logger({ level: LOG_LEVELS.ERROR, message });
-      throw new Error(message);
-    }
+    const { accessTokenPromise, splitwiseRequest, splitwiseRequestWithData } = (() => {
+      if (apiKey) {
+        const accessTokenPromise = Promise.resolve(apiKey);
+        const splitwiseRequest = getApiKeySplitwiseRequest(logger);
+        const splitwiseRequestWithData = getApiKeySplitwiseRequestWithData(logger);
+        return { accessTokenPromise, splitwiseRequest, splitwiseRequestWithData };
+      } else {
+        if (!consumerKey || !consumerSecret) {
+          const message = 'both a consumer key, and a consumer secret must be provided';
+          logger({ level: LOG_LEVELS.ERROR, message });
+          throw new Error(message);
+        }
 
-    const oauth2 = new OAuth2(
-      consumerKey,
-      consumerSecret,
-      'https://secure.splitwise.com/',
-      null,
-      'oauth/token',
-      null
-    );
+        const oauth2 = new OAuth2(
+          consumerKey,
+          consumerSecret,
+          'https://secure.splitwise.com/',
+          null,
+          'oauth/token',
+          null
+        );
 
-    const accessTokenPromise = (() => {
-      if (accessToken) {
-        logger({ message: 'using provided access token' });
-        return Promise.resolve(accessToken);
+        const accessTokenPromise = (() => {
+          if (accessToken) {
+            logger({ message: 'using provided access token' });
+            return Promise.resolve(accessToken);
+          }
+          logger({ message: 'making request for access token' });
+          return getAccessTokenPromise(logger, oauth2);
+        })();
+        const splitwiseRequest = getSplitwiseRequest(logger, oauth2);
+        const splitwiseRequestWithData = getSplitwiseRequestWithData(logger, oauth2);
       }
-      logger({ message: 'making request for access token' });
-      return getAccessTokenPromise(logger, oauth2);
     })();
+
 
     const generateEndpointMethod = getEndpointMethodGenerator(
       logger,
       accessTokenPromise,
       defaultIDs,
-      oauth2
+      splitwiseRequest,
+      splitwiseRequestWithData
     );
 
     // Each of the provided methods is generated from an element in METHODS
